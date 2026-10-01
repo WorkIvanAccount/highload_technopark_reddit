@@ -222,6 +222,94 @@
 * **Динамика:** авторизация и запросы на изменение данных проходят через Cloudflare без кэширования и направляются в API основного ДЦ в Северной Вирджинии. Публичные GET-запросы, например лента, кэшируются на несколько секунд только если допускают кратковременную задержку обновления.
 * **Статика и медиа:** Cloudflare отдает закэшированные файлы с узла, близкого к пользователю. При отсутствии файла в кэше запрос передается на origin статики.
 
+### 4. Локальная балансировка нагрузки
+```mermaid
+graph TD
+    %% Стили
+    classDef external fill:#1565c0,stroke:#0d47a1,stroke-width:2px,color:#fff;
+    classDef network fill:#9a6700,stroke:#6b4700,stroke-width:2px,color:#fff;
+    classDef l4 fill:#c2410c,stroke:#7c2d12,stroke-width:2px,color:#fff;
+    classDef l7 fill:#2e7d32,stroke:#1b5e20,stroke-width:2px,color:#fff;
+    classDef app fill:#455a64,stroke:#263238,stroke-width:1px,stroke-dasharray: 5 5,color:#fff;
+    classDef db fill:#ad1457,stroke:#880e4f,stroke-width:2px,color:#fff;
+
+    subgraph External_World [Внешний мир]
+        Client[Клиент]:::external
+        CDN[Cloudflare CDN / Edge<br/>HTTP cache: RAM/SSD, TTL]:::external
+    end
+
+    subgraph Master_DC [Origin Дата-центр]
+        direction TB
+
+        Router[Граничный роутер<br/>BGP + ECMP]:::network
+        VIP((VIP API + VIP Static/Media)):::network
+
+        subgraph L4_Cluster [Пул L4-балансировщиков]
+            LVS1[LVS-1]:::l4
+            LVS2[LVS-2]:::l4
+            LVS3[LVS-3]:::l4
+        end
+
+        subgraph L7_Cluster [Пул L7-прокси]
+            Nginx[Nginx<br/>TLS для статики/media<br/>S3 proxy]:::l7
+            Envoy[Envoy<br/>TLS API, HTTP/gRPC routing<br/>retry, timeout, mTLS]:::l7
+        end
+
+        subgraph K8s_Cluster [Kubernetes]
+            FeedSvc[Feed Service<br/>feed-pod-1]:::app
+            AuthSvc[Auth Service<br/>auth-pod-1..N]:::app
+            PostSvc[Post / Comment Service]:::app
+            SearchSvc[Search Service]:::app
+            VoteSvc[Vote Service]:::app
+        end
+
+        subgraph Data_Tier [База данных]
+            PG_Master[(PostgreSQL master<br/>запись)]:::db
+            PG_Replica[(PostgreSQL replicas<br/>чтение)]:::db
+            Redis[(Redis Cluster<br/>кэш, сессии, токены)]:::db
+            S3[(S3 / Object Storage<br/>изображения, видео, статика)]:::db
+        end
+    end
+
+    %% Запрос
+    Client -->|DNS возвращает адрес входа| CDN
+    CDN -->|Cache Hit: файл или публичный ответ<br/>отдается с edge, Origin не вызывается| Client
+    CDN -->|Cache Miss для API: запрос к Origin| Router
+    CDN -->|Cache Miss для статики/media: запрос к Origin| Router
+    Router -->|ECMP: выбор LVS по хешу 5-tuple| VIP
+    VIP -.->|Анонс VIP| LVS1
+    VIP -.->|Анонс VIP| LVS2
+    VIP -.->|Анонс VIP| LVS3
+    LVS1 -->|API VIP: меняется MAC,<br/>IP назначения остается VIP| Envoy
+    LVS2 -->|API VIP / Direct Routing| Envoy
+    LVS3 -->|API VIP / Direct Routing| Envoy
+    LVS1 -->|Static/Media VIP| Nginx
+    LVS2 -->|Static/Media VIP| Nginx
+    LVS3 -->|Static/Media VIP| Nginx
+    Nginx <-->|Загрузка и отдача файлов| S3
+    Envoy <-->|Маршрутизация по Host / URL / gRPC| FeedSvc
+    Envoy <-->|Auth API| AuthSvc
+    Envoy <-->|Post / Comment API| PostSvc
+    Envoy <-->|Search API| SearchSvc
+    Envoy <-->|Vote API| VoteSvc
+
+    %% Запросы приложения к данным
+    FeedSvc <-->|Чтение ленты| PG_Replica
+    FeedSvc <-->|Запись изменений| PG_Master
+    AuthSvc <-->|Пользователи и авторизация| PG_Master
+    PostSvc <-->|Посты и комментарии| PG_Master
+    VoteSvc <-->|Голоса и рейтинги| PG_Master
+    SearchSvc <-->|Чтение данных для индекса| PG_Replica
+    FeedSvc <-->|Проверка и обновление кэша ленты| Redis
+    AuthSvc <-->|Сессии, refresh-токены, rate limit| Redis
+    SearchSvc <-->|Индекс и результаты поиска| Redis
+
+    %% Ответ идет напрямую, минуя LVS
+    Envoy ==>|Ответ API с source IP = VIP,<br/>напрямую к клиенту| Router
+    Nginx ==>|Ответ с source IP = VIP,<br/>напрямую к клиенту| Router
+    Router ==> Client
+```
+
 ## Список источников
 
 1. **Reddit, Inc.** *Reddit by the numbers*. Официальная статистика платформы на 30 июня 2026 года. URL: https://investor.redditinc.com/overview/default.aspx (дата обращения: 16.09.2026).
