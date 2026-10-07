@@ -239,9 +239,10 @@ graph TD
         VIP_MEDIA((Media VIP<br/>203.0.113.101)):::network
 
         subgraph L4_Cluster [Пул L4-балансировщиков]
-            LVS1[LVS-1]:::l4
-            LVS2[LVS-2]:::l4
-            LVS3[LVS-3]:::l4
+            LVS1["LVS-1 (DPVS)"]:::l4
+            LVS2["LVS-2 (DPVS)"]:::l4
+            LVS3["LVS-3 (DPVS)"]:::l4
+            Keepalived[Keepalived<br/>VRRP]:::l4
         end
 
         subgraph L7_Cluster [Пул L7-прокси]
@@ -250,8 +251,8 @@ graph TD
         end
 
         subgraph K8s_Cluster [Kubernetes]
-            FeedSvc[Feed Service<br/>feed-pod-1]:::app
-            AuthSvc[Auth Service<br/>auth-pod-1..N]:::app
+            FeedSvc[Feed Service]:::app
+            AuthSvc[Auth Service]:::app
             PostSvc[Post / Comment Service]:::app
             SearchSvc[Search Service]:::app
             VoteSvc[Vote Service]:::app
@@ -272,6 +273,9 @@ graph TD
     CDN -->|Cache Miss для статики/media: запрос к Origin| Router
     Router -->|ECMP по 5-tuple| VIP_API
     Router -->|ECMP по 5-tuple| VIP_MEDIA
+    Keepalived -.->|VRRP| LVS1
+    Keepalived -.->|VRRP| LVS2
+    Keepalived -.->|VRRP| LVS3
     VIP_API -.->|BGP announce| LVS1
     VIP_API -.->|BGP announce| LVS2
     VIP_API -.->|BGP announce| LVS3
@@ -298,7 +302,6 @@ graph TD
     PostSvc <-->|Посты и комментарии| PG_Master
     VoteSvc <-->|Голоса и рейтинги| PG_Master
     SearchSvc <-->|Чтение данных для индекса| PG_Replica
-    FeedSvc <-->|Проверка и обновление кэша ленты| Redis
     AuthSvc <-->|Сессии, refresh-токены, rate limit| Redis
     SearchSvc <-->|Индекс и результаты поиска| Redis
 
@@ -307,6 +310,7 @@ graph TD
     Nginx ==>|Ответ с source IP = Media VIP,<br/>напрямую к клиенту| Router
     Router ==> Client
 ```
+
 
 ## Балансировка и резервирование
 
