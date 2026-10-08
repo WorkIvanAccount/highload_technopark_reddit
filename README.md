@@ -363,6 +363,112 @@ Nginx с N+1 = 59 + 1 = 60
 
 Число Nginx выбирается по фактическому Cache Miss Cloudflare. Для любого пула расчёт: `N = ceil(пиковая нагрузка / производительность узла)`, затем для одного ДЦ добавляется один узел: `N+1`.
 
+### 5. Логическая схема БД
+
+```mermaid
+erDiagram
+    USERS {
+        uuid user_id PK "Первичный ключ"
+        varchar_32 username UK "Уникальный никнейм"
+        varchar_64 email UK "Уникальный email"
+        varchar_72 password_hash "Хэш пароля"
+        bigint karma "Денормализованная репутация"
+        smallint status "Статус: активен / забанен"
+        timestamptz created_at "Дата регистрации"
+    }
+
+    COMMUNITIES {
+        uuid community_id PK "Первичный ключ"
+        varchar_32 name UK "Имя сабреддита (r/name)"
+        text description "Описание и правила сообщества"
+        uuid owner_id FK "Создатель"
+        int subscribers_count "Денормализованный счетчик подписчиков"
+        timestamptz created_at "Дата создания"
+    }
+
+    SUBSCRIPTIONS {
+        uuid user_id PK, FK "Пользователь"
+        uuid community_id PK, FK "Сообщество"
+        timestamptz created_at "Дата подписки"
+    }
+
+    POSTS {
+        uuid post_id PK "Первичный ключ"
+        uuid community_id FK "Сообщество"
+        uuid author_id FK "Автор"
+        varchar_10 post_type "Тип: text, media, link"
+        varchar_300 title "Заголовок поста"
+        text content "Текст поста (доступен всегда)"
+        varchar_2048 link_url "Ссылка для кнопки Открыть (только для link)"
+        int score "Денормализованный рейтинг"
+        int comments_count "Денормализованный счетчик комментариев"
+        timestamptz created_at "Дата публикации"
+    }
+
+    COMMENTS {
+        uuid comment_id PK "Первичный ключ"
+        uuid post_id FK "Пост"
+        uuid parent_id FK "Родительский комментарий (если ответ)"
+        uuid author_id FK "Автор комментария"
+        text content "Текст комментария"
+        int score "Денормализованный рейтинг"
+        smallint depth "Уровень вложенности (10)"
+        timestamptz created_at "Дата написания"
+    }
+
+    POST_VOTES {
+        uuid user_id PK, FK "Пользователь"
+        uuid post_id PK, FK "Пост"
+        smallint direction "Направление: +1 или -1"
+        timestamptz updated_at "Время голосования"
+    }
+
+    COMMENT_VOTES {
+        uuid user_id PK, FK "Пользователь"
+        uuid comment_id PK, FK "Комментарий"
+        smallint direction "Направление: +1 или -1"
+        timestamptz updated_at "Время голосования"
+    }
+    
+    MEDIA_OBJECTS {
+        uuid media_id PK "Первичный ключ"
+        uuid post_id FK "Пост"
+        varchar_10 media_type "Тип: image или video"
+        varchar_255 s3_key "Путь к файлу в S3"
+        bigint size_bytes "Размер файла в байтах"
+        smallint status "Статус обработки: ready, processing"
+        timestamptz created_at "Время загрузки"
+    }
+
+    SESSIONS_CACHE {
+        varchar_64 session_token PK "Ключ в Redis"
+        uuid user_id FK "Пользователь"
+        varchar_45 ip_address "IP-адрес входа"
+        timestamptz expires_at "Время жизни сессии"
+    }
+
+    USERS ||--o{ SESSIONS_CACHE : "имеет сессии"
+
+
+    POSTS ||--o{ MEDIA_OBJECTS : "прикрепляет"
+
+    USERS ||--o{ POST_VOTES : "голосует"
+    POSTS ||--o{ POST_VOTES : "оценивается"
+    USERS ||--o{ COMMENT_VOTES : "голосует"
+    COMMENTS ||--o{ COMMENT_VOTES : "оценивается"
+
+    USERS ||--o{ COMMENTS : "пишет"
+    POSTS ||--o{ COMMENTS : "содержит"
+    COMMENTS ||--o{ COMMENTS : "ответ на (parent_id)"
+
+    USERS ||--o{ COMMUNITIES : "создает (owner_id)"
+    USERS ||--o{ SUBSCRIPTIONS : "подписывается"
+    COMMUNITIES ||--o{ SUBSCRIPTIONS : "имеет подписчиков"
+    USERS ||--o{ POSTS : "публикует"
+    COMMUNITIES ||--o{ POSTS : "содержит"
+```
+
+
 
 ## Список источников
 
