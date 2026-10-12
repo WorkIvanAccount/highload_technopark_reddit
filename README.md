@@ -391,33 +391,39 @@ erDiagram
         timestamptz created_at "Дата создания"
     }
 
-    SUBSCRIPTIONS {
-        uuid user_id PK, FK "Пользователь"
+    USER_SUBSCRIPTIONS {
+        uuid user_id PK, FK "Пользователь (владелец подписки)"
         uuid community_id PK, FK "Сообщество"
         timestamptz created_at "Дата подписки"
     }
 
+    COMMUNITY_SUBSCRIBERS {
+        uuid community_id PK, FK "Сообщество"
+        uuid user_id PK, FK "Подписчик"
+        timestamptz created_at "Дата вступления"
+    }
+
     POSTS {
-        uuid post_id PK "Первичный ключ"
+        uuid author_id PK, FK "Автор (user_id)"
+        uuid post_id PK "Идентификатор публикации"
         uuid community_id FK "Сообщество"
-        uuid author_id FK "Автор"
         varchar_10 post_type "Тип: text, media, link"
         varchar_300 title "Заголовок поста"
-        text content "Текст поста (доступен всегда)"
-        varchar_2048 link_url "Ссылка для кнопки Открыть (только для link)"
+        text content "Текст поста"
+        varchar_2048 link_url "Ссылка (для link-постов)"
         int score "Денормализованный рейтинг"
         int comments_count "Денормализованный счетчик комментариев"
         timestamptz created_at "Дата публикации"
     }
 
     COMMENTS {
-        uuid comment_id PK "Первичный ключ"
-        uuid post_id FK "Пост"
+        uuid author_id PK, FK "Автор комментария (user_id)"
+        uuid comment_id PK "Идентификатор комментария"
+        uuid post_id FK "Публикация"
         uuid parent_id FK "Родительский комментарий (если ответ)"
-        uuid author_id FK "Автор комментария"
         text content "Текст комментария"
         int score "Денормализованный рейтинг"
-        smallint depth "Уровень вложенности (10)"
+        smallint depth "Уровень вложенности (до 10)"
         timestamptz created_at "Дата написания"
     }
 
@@ -446,7 +452,7 @@ erDiagram
     }
 
     SESSIONS_CACHE {
-        varchar_64 session_token PK "Ключ в Redis"
+        varchar_64 session_token PK "Ключ сессии"
         uuid user_id FK "Пользователь"
         varchar_45 ip_address "IP-адрес входа"
         timestamptz expires_at "Время жизни сессии"
@@ -454,6 +460,18 @@ erDiagram
 
     USERS ||--o{ SESSIONS_CACHE : "имеет сессии"
 
+    USERS ||--o{ USER_SUBSCRIPTIONS : "подписан на"
+    COMMUNITIES ||--o{ USER_SUBSCRIPTIONS : "входит в подписки"
+    COMMUNITIES ||--o{ COMMUNITY_SUBSCRIBERS : "имеет подписчиков"
+    USERS ||--o{ COMMUNITY_SUBSCRIBERS : "состоит в сообществе"
+
+    USERS ||--o{ COMMUNITIES : "создает (owner_id)"
+    USERS ||--o{ POSTS : "публикует (author_id)"
+    COMMUNITIES ||--o{ POSTS : "содержит"
+
+    USERS ||--o{ COMMENTS : "пишет (author_id)"
+    POSTS ||--o{ COMMENTS : "содержит (post_id)"
+    COMMENTS ||--o{ COMMENTS : "ответ на (parent_id)"
 
     POSTS ||--o{ MEDIA_OBJECTS : "прикрепляет"
 
@@ -461,31 +479,23 @@ erDiagram
     POSTS ||--o{ POST_VOTES : "оценивается"
     USERS ||--o{ COMMENT_VOTES : "голосует"
     COMMENTS ||--o{ COMMENT_VOTES : "оценивается"
-
-    USERS ||--o{ COMMENTS : "пишет"
-    POSTS ||--o{ COMMENTS : "содержит"
-    COMMENTS ||--o{ COMMENTS : "ответ на (parent_id)"
-
-    USERS ||--o{ COMMUNITIES : "создает (owner_id)"
-    USERS ||--o{ SUBSCRIPTIONS : "подписывается"
-    COMMUNITIES ||--o{ SUBSCRIPTIONS : "имеет подписчиков"
-    USERS ||--o{ POSTS : "публикует"
-    COMMUNITIES ||--o{ POSTS : "содержит"
 ```
+
 
 ### Описание таблиц
 
 | Таблица | Назначение | Основные поля и связи |
 |---|---|---|
-| `USERS` | Учётные записи пользователей | `user_id` — PK; `username` и `email` уникальны; `password_hash` хранит хэш пароля; `karma` — текущая репутация; `status` — состояние аккаунта; `created_at` — дата регистрации. Связана с публикациями, комментариями, сообществами, подписками, голосами и сессиями. |
-| `COMMUNITIES` | Тематические сообщества | `community_id` — PK; `name` уникально; `description` — описание и правила; `owner_id` — создавший сообщество пользователь; `subscribers_count` — счётчик подписчиков; `created_at` — дата создания. Связана с владельцем, подписками и публикациями. |
-| `SUBSCRIPTIONS` | Подписки пользователей на сообщества | Составной PK (`user_id`, `community_id`); оба поля также FK; `created_at` — дата подписки. Соединяет `USERS` и `COMMUNITIES`. |
-| `POSTS` | Публикации в сообществах | `post_id` — PK; `community_id` и `author_id` — FK; `post_type` задаёт тип публикации; `title`, `content` и `link_url` содержат её данные; `score` и `comments_count` — счётчики; `created_at` — дата публикации. Связана с сообществом, автором, комментариями, голосами и медиафайлами. |
-| `COMMENTS` | Комментарии и ответы | `comment_id` — PK; `post_id` и `author_id` — FK; `parent_id` — FK на родительский комментарий, если это ответ; `content` — текст; `score` — рейтинг; `depth` — уровень вложенности; `created_at` — дата написания. Связана с публикацией, автором, родительским комментарием и голосами. |
+| `USERS` | Учётные записи пользователей | `user_id` — PK; `username` и `email` уникальны; `password_hash` хранит хэш пароля; `karma` — текущая репутация; `status` — состояние аккаунта; `created_at` — дата регистрации. Связан Описание таблица с публикациями, комментариями, сообществами, подписками, голосами и сессиями. |
+| `COMMUNITIES` | Тематические сообщества (сабреддиты) | `community_id` — PK; `name` уникально; `description` — описание и правила; `owner_id` — создавший сообщество пользователь; `subscribers_count` — денормализованный счётчик подписчиков; `created_at` — дата создания. Связана с создателем, аудиторией и публикациями. |
+| `USER_SUBSCRIPTIONS` | Подписки конкретного пользователя | Составной PK (`user_id`, `community_id`); оба поля — FK; `created_at` — дата подписки. Используется для мгновенной выборки сабреддитов пользователя при формировании персонализированной ленты. |
+| `COMMUNITY_SUBSCRIBERS` | Список участников сообщества | Составной PK (`community_id`, `user_id`); оба поля — FK; `created_at` — дата вступления. Обеспечивает мгновенный доступ к аудитории сабреддита по ключу сообщества. |
+| `POSTS` | Публикации в сообществах | Составной PK (`author_id`, `post_id`), где `author_id` — FK на автора (`user_id`); `community_id` — FK на сабреддит; `post_type` — тип контента (text, media, link); `title`, `content` и `link_url` — тело поста; `score` и `comments_count` — денормализованные счётчики; `created_at` — дата публикации. |
+| `COMMENTS` | Комментарии и ответы | Составной PK (`author_id`, `comment_id`), где `author_id` — FK на автора (`user_id`); `post_id` — FK на публикацию; `parent_id` — FK на родительский комментарий (вложенность до 10 уровней); `content` — текст; `score` — рейтинг; `depth` — уровень дерева; `created_at` — дата создания. Ключ по автору предотвращает Hot Key на запись в вирусных тредах и упрощает модерацию/бан спамеров. |
 | `POST_VOTES` | Голоса за публикации | Составной PK (`user_id`, `post_id`), оба поля — FK; `direction` хранит `+1` или `-1`; `updated_at` — время последнего изменения голоса. Связывает пользователя с публикацией. |
 | `COMMENT_VOTES` | Голоса за комментарии | Составной PK (`user_id`, `comment_id`), оба поля — FK; `direction` хранит `+1` или `-1`; `updated_at` — время последнего изменения голоса. Связывает пользователя с комментарием. |
-| `MEDIA_OBJECTS` | Метаданные медиафайлов публикаций | `media_id` — PK; `post_id` — FK; `media_type` задаёт тип файла; `s3_key` указывает расположение файла; `size_bytes` — размер; `status` — состояние обработки; `created_at` — время загрузки. Сам файл хранится вне таблицы, в S3. |
-| `SESSIONS_CACHE` | Данные пользовательских сессий в Redis | `session_token` — PK и ключ сессии; `user_id` — FK на владельца; `ip_address` — IP входа; `expires_at` — срок действия. Связана с пользователем. |
+| `MEDIA_OBJECTS` | Метаданные медиафайлов публикаций | `media_id` — PK; `post_id` — FK; `media_type` задаёт тип файла (image/video); `s3_key` указывает расположение объекта в S3; `size_bytes` — размер; `status` — состояние обработки (ready, processing); `created_at` — время загрузки. Сам бинарный файл хранится в Object Storage. |
+| `SESSIONS_CACHE` | Данные сессий в Redis | `session_token` — PK и ключ сессии; `user_id` — FK на владельца; `ip_address` — IP входа; `expires_at` — срок действия сессии. Обеспечивает быстрый stateless-auth. |
 
 ### 1. Данные, файлы, кэши и буферы
 
