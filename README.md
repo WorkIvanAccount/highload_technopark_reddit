@@ -16,6 +16,7 @@
 - [7. Алгоритмы](#7-алгоритмы)
 - [8. Технологии](#8-технологии)
 - [9. Обеспечение надёжности](#9-обеспечение-надёжности)
+- [10. Схема проекта](#10-схема-проекта)
 - [Список источников](#список-источников)
 
 ## 1. Тема и целевая аудитория
@@ -922,6 +923,94 @@ WHERE post_id = :post_id
 | Origin ДЦ проекта в Северной Вирджинии | Базовые копии шардов, архив WAL и конфигурация маршрутизации хранятся вне Origin. | При отказе площадки вход, лента, поиск и запись недоступны. При потере площадки разворачиваем бэкенд заново, восстанавливаем шарды на согласованный момент и проверяем чтение и запись перед возвратом трафика. |
 
 **Проверка.** На нагрузочном стенде отключаем один Envoy на расчётном пике и переключаем primary под записями. Затем проверяем, что холодный Redis укладывается в лимит запросов к БД, а пул Nginx ограничивает скачивания при исчерпании ёмкости. Отдельно восстанавливаем данные из копии и WAL и замеряем время до успешного чтения и записи.
+
+## 10. Схема проекта
+
+```mermaid
+flowchart TD
+    Client[Клиент] --> Edge
+
+    subgraph CDN[Cloudflare CDN]
+        Edge[Вход через Anycast и локальный кэш]
+        Regional[Региональный кэш медиа]
+        Edge -->|Медиа нет в локальном кэше| Regional
+    end
+
+    Edge -->|API и промах кэша статики| Router
+    Regional -->|Медиа нет в региональном кэше| Router
+
+    subgraph Origin[Origin ДЦ в Северной Вирджинии]
+        Router[Граничные маршрутизаторы BGP / ECMP]
+        Router -->|ECMP| ApiVIP([API VIP])
+        Router -->|ECMP| MediaVIP([Media VIP])
+        ApiVIP --> LVS[Пул из двух LVS / DPVS]
+        MediaVIP --> LVS
+        LVS -->|DR для API VIP| Envoy[Пул Envoy]
+        LVS -->|DR для Media VIP| Nginx[Пул Nginx]
+        Nginx -->|Файлы| S3[(S3)]
+
+        subgraph Apps[Сервисы в Kubernetes]
+            Feed[Feed]
+            Auth[Auth]
+            Post[Post / Comment]
+            Vote[Vote]
+            Search[Search]
+        end
+
+        Envoy --> Feed
+        Envoy --> Auth
+        Envoy --> Post
+        Envoy --> Vote
+        Envoy --> Search
+
+        Feed -->|Список ID постов| Redis[(Redis)]
+        Auth -->|Refresh-токены| Redis
+        Feed -->|Посты и подписки| Replica[(Реплики PostgreSQL)]
+        Search -->|Поиск GIN| Replica
+        Auth --> Primary[(Основные узлы PostgreSQL)]
+        Post --> Primary
+        Vote --> Primary
+        Primary -->|Репликация WAL| Replica
+
+        Post -.->|Задания на обработку| Kafka[Kafka]
+        Kafka -.-> Worker[Обработчик медиа]
+        Worker --> S3
+
+        Envoy ==>|Ответ с адреса API VIP| Router
+        Nginx ==>|Ответ с адреса Media VIP| Router
+    end
+
+    Router ==>|Ответ от Origin ДЦ| CDN
+    Edge ==>|Ответ клиенту| Client
+
+    classDef cdn fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef api fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef media fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef storage fill:#ede9fe,stroke:#6d28d9,color:#3b0764
+    classDef network fill:#fef3c7,stroke:#92400e,color:#78350f
+    class Edge,Regional cdn
+    class Envoy,Feed,Auth,Post,Vote,Search api
+    class Nginx,Kafka,Worker media
+    class S3,Primary,Replica,Redis storage
+    class Router,ApiVIP,MediaVIP,LVS network
+```
+
+| Элемент | Как работает |
+|---|---|
+| Клиент | Отправляет запросы к `www` за статикой, к `api` за данными и к `media` за файлами. |
+| Cloudflare Anycast и кэш | Anycast направляет клиента на доступный узел Cloudflare. Узел отдаёт статику и медиа из своего кэша при попадании. Запросы `api` проксируются в Origin ДЦ. |
+| Региональный кэш Cloudflare | Проверяется после промаха медиа на ближайшем узле. Если файла нет и здесь, запрос идёт в Origin ДЦ, где Nginx получает файл из S3. |
+| Граничные маршрутизаторы и VIP | API и файлы приходят на разные виртуальные IP-адреса. Два LVS анонсируют маршруты к VIP по BGP. Маршрутизаторы распределяют входящие соединения между доступными LVS через ECMP. |
+| LVS / DPVS | По VIP выбирает экземпляр Envoy или Nginx. В режиме Direct Routing меняет MAC-адрес назначения на MAC выбранного узла, сохраняя IP назначения. |
+| Envoy | Завершает TLS, выбирает API-сервис по имени хоста или пути и направляет запрос на доступный экземпляр в Kubernetes. |
+| Nginx и S3 | Nginx завершает TLS и проксирует загрузку и скачивание файлов в S3. S3 хранит статику, оригиналы медиа и обработанные версии. |
+| Обратный путь ответа | Толстые стрелки показывают возврат ответа. Envoy и Nginx отвечают с соответствующего VIP напрямую через граничный маршрутизатор, минуя LVS. Маршрутизатор передаёт ответ Cloudflare, а ближайший узел Cloudflare отдаёт его клиенту. |
+| Feed | При чтении ленты берёт список ID постов из Redis, а сами посты читает из PostgreSQL. Если списка нет, строит его по подпискам и постам. |
+| Auth | Проверяет учётные данные в PostgreSQL и использует Redis для хранения refresh-токенов. |
+| Post / Comment и Vote | Post / Comment записывает посты и комментарии в PostgreSQL. Vote записывает голоса и обновляет счётчики. |
+| Search | Ищет посты и сообщества через полнотекстовые GIN-индексы PostgreSQL. |
+| PostgreSQL и Redis | PostgreSQL хранит основные данные. Записи идут на основной узел нужного шарда, чтение может идти с реплик. Redis хранит списки лент и данные сессий. |
+| Kafka и обработчик медиа | Kafka передаёт задания на фоновую обработку. Обработчик читает оригинал из S3 и сохраняет туда превью или версии видео. Пунктир обозначает асинхронную передачу заданий. |
 
 ## Список источников
 
